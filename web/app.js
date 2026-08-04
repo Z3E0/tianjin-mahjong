@@ -34,6 +34,13 @@ const state = {
   fps: 0,
   frameCount: 0,
   fpsTimer: 0,
+
+  // Zone system
+  zones: {
+    hand: { x: 0.05, y: 0.15, w: 0.90, h: 0.35 },    // Top area — normalized 0-1
+    discard: { x: 0.05, y: 0.55, w: 0.90, h: 0.35 },  // Bottom area
+  },
+  editingZones: false,
 };
 
 // === DOM Elements ===
@@ -329,17 +336,205 @@ async function captureAndDetect() {
 
   els.statusText.textContent = `Detected: ${detections.length} tiles | ${state.fps} FPS`;
 }
+// === Zone System ===
+// Zones are stored as normalized coordinates (0-1) relative to video dimensions
+function loadZones() {
+  try {
+    const saved = localStorage.getItem('mj_zones');
+    if (saved) state.zones = JSON.parse(saved);
+  } catch(e) {}
+}
 
+function saveZones() {
+  localStorage.setItem('mj_zones', JSON.stringify(state.zones));
+}
+
+function zoneToPixel(zone) {
+  const vw = els.camera.videoWidth || 640;
+  const vh = els.camera.videoHeight || 480;
+  return {
+    x: zone.x * vw, y: zone.y * vh,
+    w: zone.w * vw, h: zone.h * vh
+  };
+}
+
+function isInZone(det, zoneName) {
+  const zone = state.zones[zoneName];
+  if (!zone) return false;
+  const cx = (det.bbox.x1 + det.bbox.x2) / 2;
+  const cy = (det.bbox.y1 + det.bbox.y2) / 2;
+  const vw = els.camera.videoWidth || 640;
+  const vh = els.camera.videoHeight || 480;
+  return cx >= zone.x * vw && cx <= (zone.x + zone.w) * vw &&
+         cy >= zone.y * vh && cy <= (zone.y + zone.h) * vh;
+}
+
+// === Zone Editing (touch-based drag/resize) ===
+let dragState = null; // { zone, handle, startX, startY, origZone }
+
+function initZoneEditor() {
+  const canvas = els.overlay;
+  canvas.style.pointerEvents = 'auto'; // re-enable for zone editing
+
+  function getHandle(e) {
+    const touch = e.touches[0];
+    const rect = canvas.getBoundingClientRect();
+    const px = touch.clientX - rect.left;
+    const py = touch.clientY - rect.top;
+    const scaleX = (els.camera.videoWidth || 640) / rect.width;
+    const scaleY = (els.camera.videoHeight || 480) / rect.height;
+    const vx = px * scaleX;
+    const vy = py * scaleY;
+    const HANDLE_R = 25; // touch radius
+
+    for (const [name, zone] of Object.entries(state.zones)) {
+      const pz = zoneToPixel(zone);
+      // Corner handles
+      const corners = [
+        { h: 'tl', x: pz.x, y: pz.y },
+        { h: 'tr', x: pz.x + pz.w, y: pz.y },
+        { h: 'bl', x: pz.x, y: pz.y + pz.h },
+        { h: 'br', x: pz.x + pz.w, y: pz.y + pz.h },
+        { h: 'body', x: pz.x + pz.w/2, y: pz.y + pz.h/2 },
+      ];
+      for (const c of corners) {
+        if (Math.abs(vx - c.x) < HANDLE_R && Math.abs(vy - c.y) < HANDLE_R) {
+          return { zoneName: name, handle: c.h };
+        }
+      }
+    }
+    return null;
+  }
+
+  canvas.addEventListener('touchstart', (e) => {
+    if (!state.editingZones) return;
+    const hit = getHandle(e);
+    if (!hit) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragState = {
+      zoneName: hit.zoneName,
+      handle: hit.handle,
+      startX: e.touches[0].clientX,
+      startY: e.touches[0].clientY,
+      origZone: { ...state.zones[hit.zoneName] },
+    };
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', (e) => {
+    if (!dragState || !state.editingZones) return;
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const dx = (e.touches[0].clientX - dragState.startX) / rect.width;
+    const dy = (e.touches[0].clientY - dragState.startY) / rect.height;
+    const z = dragState.origZone;
+    const zone = state.zones[dragState.zoneName];
+
+    switch (dragState.handle) {
+      case 'body':
+        zone.x = Math.max(0, Math.min(1 - z.w, z.x + dx));
+        zone.y = Math.max(0, Math.min(1 - z.h, z.y + dy));
+        break;
+      case 'tl':
+        zone.x = Math.max(0, z.x + dx);
+        zone.y = Math.max(0, z.y + dy);
+        zone.w = Math.max(0.05, z.w - dx);
+        zone.h = Math.max(0.05, z.h - dy);
+        break;
+      case 'br':
+        zone.w = Math.max(0.05, z.w + dx);
+        zone.h = Math.max(0.05, z.h + dy);
+        break;
+      case 'tr':
+        zone.y = Math.max(0, z.y + dy);
+        zone.w = Math.max(0.05, z.w + dx);
+        zone.h = Math.max(0.05, z.h - dy);
+        break;
+      case 'bl':
+        zone.x = Math.max(0, z.x + dx);
+        zone.w = Math.max(0.05, z.w - dx);
+        zone.h = Math.max(0.05, z.h + dy);
+        break;
+    }
+    drawZoneOverlay();
+  }, { passive: false });
+
+  canvas.addEventListener('touchend', () => {
+    if (dragState) {
+      saveZones();
+      drawZoneOverlay();
+      dragState = null;
+    }
+  });
+}
+
+function drawZoneOverlay() {
+  const canvas = els.overlay;
+  const ctx = canvas.getContext('2d');
+  // Don't clear — detection overlay draws on top. We draw zones separate.
+  if (!state.editingZones) return;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (const [name, zone] of Object.entries(state.zones)) {
+    const pz = zoneToPixel(zone);
+    const color = name === 'hand' ? 'rgba(76, 175, 80, 0.3)' : 'rgba(244, 67, 54, 0.3)';
+    const border = name === 'hand' ? '#4caf50' : '#f44336';
+    const label = name === 'hand' ? '🀄 Hand' : '🗑️ Discard';
+
+    // Zone fill
+    ctx.fillStyle = color;
+    ctx.fillRect(pz.x, pz.y, pz.w, pz.h);
+
+    // Border
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8, 4]);
+    ctx.strokeRect(pz.x, pz.y, pz.w, pz.h);
+    ctx.setLineDash([]);
+
+    // Label
+    ctx.fillStyle = border;
+    ctx.font = 'bold 16px sans-serif';
+    ctx.fillText(label, pz.x + 6, pz.y + 22);
+
+    // Corner handles
+    const corners = [
+      [pz.x, pz.y], [pz.x + pz.w, pz.y],
+      [pz.x, pz.y + pz.h], [pz.x + pz.w, pz.y + pz.h],
+    ];
+    for (const [cx, cy] of corners) {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = border;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+}
+
+// === Game State Update ===
 function updateGameState(detections) {
-  // Extract tile IDs from detections
-  // For now: treat all detected tiles as hand tiles
-  // In future: separate hand tiles from discards based on position
-  const tileIds = detections
-    .filter(d => d.classId < TIANJIN_ENGINE.NUM_TILES)
-    .map(d => d.classId);
+  const engine = TIANJIN_ENGINE;
+  const handIds = [];
+  const discardIds = [];
 
-  state.handTiles = tileIds.slice(0, 14); // Max 14 hand tiles
-  state.discards = tileIds.slice(14);     // Rest are discards
+  for (const det of detections) {
+    if (det.classId >= engine.NUM_TILES) continue;
+    if (isInZone(det, 'hand')) {
+      handIds.push(det.classId);
+    } else if (isInZone(det, 'discard')) {
+      discardIds.push(det.classId);
+    }
+    // Tiles not in any zone are ignored
+  }
+
+  state.handTiles = handIds.slice(0, 14);
+  // Accumulate discards (don't replace each frame — user clears manually)
+  for (const id of discardIds) {
+    state.discards.push(id);
+  }
 }
 
 function drawOverlay(detections) {
@@ -347,32 +542,46 @@ function drawOverlay(detections) {
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+  // Draw zones (semi-transparent, always visible)
+  for (const [name, zone] of Object.entries(state.zones)) {
+    const pz = zoneToPixel(zone);
+    const fill = name === 'hand' ? 'rgba(76, 175, 80, 0.08)' : 'rgba(244, 67, 54, 0.08)';
+    const border = name === 'hand' ? 'rgba(76, 175, 80, 0.3)' : 'rgba(244, 67, 54, 0.3)';
+    ctx.fillStyle = fill;
+    ctx.fillRect(pz.x, pz.y, pz.w, pz.h);
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 6]);
+    ctx.strokeRect(pz.x, pz.y, pz.w, pz.h);
+    ctx.setLineDash([]);
+  }
+
+  // Draw detection boxes, colored by zone
   for (const det of detections) {
     const { x1, y1, x2, y2 } = det.bbox;
     const w = x2 - x1;
     const h = y2 - y1;
 
-    // Bounding box
-    ctx.strokeStyle = '#e94560';
+    let color = '#888'; // unzoned
+    if (isInZone(det, 'hand')) color = '#4caf50';
+    else if (isInZone(det, 'discard')) color = '#f44336';
+
+    ctx.strokeStyle = color;
     ctx.lineWidth = 2;
     ctx.strokeRect(x1, y1, w, h);
 
-    // Label background
-    ctx.fillStyle = 'rgba(233, 69, 96, 0.85)';
+    ctx.fillStyle = color;
     const label = `${det.className} ${Math.round(det.confidence * 100)}%`;
-    const textWidth = ctx.measureText(label).width + 8;
-    ctx.fillRect(x1, y1 - 20, textWidth, 18);
-
-    // Label text
+    ctx.font = '11px sans-serif';
+    const tw = ctx.measureText(label).width + 6;
+    ctx.fillRect(x1, y1 - 18, tw, 16);
     ctx.fillStyle = '#fff';
-    ctx.font = '12px sans-serif';
-    ctx.fillText(label, x1 + 4, y1 - 6);
+    ctx.fillText(label, x1 + 3, y1 - 5);
   }
 }
 
-// === UI Updates ===
+// === UI Updates (no change from original, except editing toggle) ===
 function updateDisplay() {
-  // Hand tiles
   const tileCounts = TIANJIN_ENGINE.countTiles(state.handTiles);
   els.tileCount.textContent = `${state.handTiles.length} tiles`;
 
@@ -382,14 +591,12 @@ function updateDisplay() {
       handHtml += `<span class="tile-badge">${TIANJIN_ENGINE.TILE_NAMES[i]}×${tileCounts[i]}</span>`;
     }
   }
-  if (!handHtml) handHtml = '<span class="rec-waiting">No tiles detected</span>';
+  if (!handHtml) handHtml = '<span class="rec-waiting">No tiles in hand zone</span>';
   els.handTiles.innerHTML = handHtml;
 
-  // Raw text
   const rawNames = state.handTiles.map(id => TIANJIN_ENGINE.ID_TO_TILE[id]).join(', ');
   els.handRaw.textContent = rawNames ? `[${rawNames}]` : '';
 
-  // Discards
   const discardCounts = TIANJIN_ENGINE.countTiles(state.discards);
   let discardHtml = '';
   for (let i = 0; i < TIANJIN_ENGINE.NUM_TILES; i++) {
@@ -399,27 +606,30 @@ function updateDisplay() {
   }
   if (!discardHtml) discardHtml = '<span class="rec-waiting">None yet</span>';
   els.discardTiles.innerHTML = discardHtml;
+
+  // Hun indicator
+  const hunEl = document.getElementById('hun-display');
+  if (hunEl) {
+    hunEl.textContent = state.hunDora != null
+      ? `混儿: ${TIANJIN_ENGINE.TILE_NAMES[state.hunDora]}`
+      : '混儿: not set';
+  }
 }
 
-// === Strategy ===
+// === Strategy (unchanged logic, uses zones now) ===
 function runStrategy() {
   if (state.handTiles.length < 13) {
-    els.recContent.innerHTML = '<p class="rec-waiting">Need at least 13 tiles detected</p>';
+    els.recContent.innerHTML = '<p class="rec-waiting">Need at least 13 tiles in hand zone</p>';
     return;
   }
 
   const engine = TIANJIN_ENGINE;
-  const hunDoraId = state.hunDora; // null if not set
+  const hunDoraId = state.hunDora;
 
   if (state.handTiles.length === 14) {
-    // Analyze discards
     const results = engine.analyzeDiscard(
-      state.handTiles,
-      state.discards,
-      state.melds,
-      hunDoraId
+      state.handTiles, state.discards, state.melds, hunDoraId
     );
-
     if (results.length === 0) {
       els.recContent.innerHTML = '<p class="rec-waiting">No valid discards found</p>';
       return;
@@ -445,43 +655,32 @@ function runStrategy() {
 
     html += `<div class="rec-detail">安全度: ${engine.safetyEmoji(best.safety)} ${best.safety}</div>`;
 
-    // Show alternatives
     if (results.length > 1) {
       html += `<div class="rec-options">`;
       for (let i = 1; i < Math.min(results.length, 4); i++) {
         const r = results[i];
-        const safetyClass = r.safety >= 70 ? 'safety-safe' :
-                           r.safety >= 40 ? 'safety-caution' : 'safety-danger';
+        const safetyClass = r.safety >= 70 ? 'safety-safe' : r.safety >= 40 ? 'safety-caution' : 'safety-danger';
         html += `<div class="rec-option ${safetyClass}">`;
         html += `<span class="tile-name">${r.tileName}</span>`;
-        if (r.shanten === 0) {
-          html += `<span class="tile-info">听 ${r.waitCount} 张</span>`;
-        } else {
-          html += `<span class="tile-info">${r.shanten} 向听 | ${engine.safetyEmoji(r.safety)} ${r.safety}</span>`;
-        }
+        html += r.shanten === 0
+          ? `<span class="tile-info">听 ${r.waitCount} 张</span>`
+          : `<span class="tile-info">${r.shanten} 向听 | ${engine.safetyEmoji(r.safety)} ${r.safety}</span>`;
         html += `</div>`;
       }
       html += `</div>`;
     }
-
     html += `</div>`;
     els.recContent.innerHTML = html;
-
-    // Voice output
     speakRecommendation(best);
 
   } else if (state.handTiles.length === 13) {
-    // Show tenpai status
     const remaining = engine.getRemaining(state.handTiles, state.discards, state.melds);
     const shanten = engine.calcShanten(state.handTiles, hunDoraId, remaining);
 
     if (shanten === 0) {
       const waits = engine.findWaits(state.handTiles, hunDoraId, remaining);
       const totalWait = waits.reduce((s, w) => s + w.remaining, 0);
-      const waitNames = waits.map(w =>
-        `${engine.TILE_NAMES[w.tileId]}(${w.remaining})`
-      ).join(' ');
-
+      const waitNames = waits.map(w => `${engine.TILE_NAMES[w.tileId]}(${w.remaining})`).join(' ');
       els.recContent.innerHTML = `
         <div class="rec-result">
           <div class="rec-top">🎯 听牌！</div>
@@ -501,30 +700,20 @@ function runStrategy() {
 // === Voice Output ===
 function speakRecommendation(recommendation) {
   if (!('speechSynthesis' in window)) return;
-
-  // Cancel any ongoing speech
   window.speechSynthesis.cancel();
-
   const text = buildVoiceText(recommendation);
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = 'zh-CN';
   utterance.rate = 0.9;
   utterance.pitch = 1.0;
-
   window.speechSynthesis.speak(utterance);
 }
 
 function buildVoiceText(rec) {
   const parts = [`打${rec.tileName}`];
-
-  if (rec.shanten === -1) {
-    parts.push('恭喜，胡了！');
-  } else if (rec.shanten === 0) {
-    parts.push(`听${rec.waitCount}张`);
-  } else {
-    parts.push(`距听牌还差${rec.shanten}步`);
-  }
-
+  if (rec.shanten === -1) parts.push('恭喜，胡了！');
+  else if (rec.shanten === 0) parts.push(`听${rec.waitCount}张`);
+  else parts.push(`距听牌还差${rec.shanten}步`);
   return parts.join('，');
 }
 
@@ -532,13 +721,8 @@ function buildVoiceText(rec) {
 function toggleRunning() {
   state.running = !state.running;
   els.btnToggle.textContent = state.running ? '⏸ Pause' : '▶ Start';
-
-  if (state.running) {
-    log('Auto-detection started');
-    autoSnapshotLoop();
-  } else {
-    log('Auto-detection paused');
-  }
+  if (state.running) { log('Auto-detection started'); autoSnapshotLoop(); }
+  else { log('Auto-detection paused'); }
 }
 
 async function manualSnapshot() {
@@ -552,16 +736,26 @@ function clearDiscards() {
   log('Discards cleared');
 }
 
+function toggleZoneEdit() {
+  state.editingZones = !state.editingZones;
+  const btn = document.getElementById('btn-zone-edit');
+  btn.textContent = state.editingZones ? '✅ Done' : '✏️ Zones';
+  btn.style.background = state.editingZones ? 'var(--safe)' : '';
+  if (state.editingZones) {
+    drawZoneOverlay();
+    log('Zone editing: drag corners to resize, drag center to move');
+  } else {
+    saveZones();
+    els.overlay.getContext('2d').clearRect(0, 0, els.overlay.width, els.overlay.height);
+  }
+}
+
 // === Auto-snapshot Loop ===
 let snapshotTimer = null;
-
 function autoSnapshotLoop() {
   if (!state.running) return;
-
   captureAndDetect().finally(() => {
-    if (state.running) {
-      snapshotTimer = setTimeout(autoSnapshotLoop, SNAPSHOT_INTERVAL);
-    }
+    if (state.running) snapshotTimer = setTimeout(autoSnapshotLoop, SNAPSHOT_INTERVAL);
   });
 }
 
@@ -570,20 +764,65 @@ async function init() {
   log('Tianjin Mahjong AI — Initializing...');
   els.statusText.textContent = 'Initializing...';
 
+  loadZones();
   await setupCamera();
   await loadModel();
 
-  // Set up event listeners
+  // Build wild card picker
+  buildHunPicker();
+
+  // Event listeners
   els.btnToggle.addEventListener('click', toggleRunning);
   els.btnSnapshot.addEventListener('click', manualSnapshot);
   els.btnClearDiscards.addEventListener('click', clearDiscards);
 
+  const zoneBtn = document.getElementById('btn-zone-edit');
+  if (zoneBtn) zoneBtn.addEventListener('click', toggleZoneEdit);
+
+  initZoneEditor();
+
   // Auto-start
   state.running = true;
   els.btnToggle.textContent = '⏸ Pause';
-  els.statusText.textContent = 'Ready — detecting...';
+  els.statusText.textContent = 'Ready — position zones, set 混儿, then detect';
   log('Ready ✓');
   autoSnapshotLoop();
+}
+
+// === Wild Card Picker ===
+function buildHunPicker() {
+  const container = document.getElementById('hun-picker');
+  if (!container) return;
+
+  const engine = TIANJIN_ENGINE;
+  let html = '<div class="hun-label">混儿 (wild card): </div>';
+  html += '<div class="hun-tiles">';
+
+  for (let i = 0; i < engine.NUM_TILES; i++) {
+    const selected = state.hunDora === i ? ' selected' : '';
+    html += `<span class="hun-tile${selected}" data-tile="${i}">${engine.TILE_NAMES[i]}</span>`;
+  }
+  html += '</div>';
+  html += '<button id="btn-clear-hun" class="small-btn">Clear</button>';
+  container.innerHTML = html;
+
+  // Click handlers
+  container.querySelectorAll('.hun-tile').forEach(el => {
+    el.addEventListener('click', () => {
+      const id = parseInt(el.dataset.tile);
+      state.hunDora = (state.hunDora === id) ? null : id;
+      buildHunPicker(); // rebuild to update selection
+      updateDisplay();
+      log(`混儿 set to: ${state.hunDora != null ? engine.TILE_NAMES[state.hunDora] : 'none'}`);
+    });
+  });
+
+  document.getElementById('btn-clear-hun').addEventListener('click', () => {
+    state.hunDora = null;
+    buildHunPicker();
+    updateDisplay();
+    log('混儿 cleared');
+  });
 }
 
 // === Start ===

@@ -14,6 +14,7 @@
         <video id="camera" autoplay playsinline muted></video>
         <canvas id="overlay"></canvas>
         <div id="camera-controls">
+            <button id="btn-zone-edit" class="ctrl-btn">✏️ Zones</button>
             <button id="btn-toggle" class="ctrl-btn">⏸ Pause</button>
             <button id="btn-snapshot" class="ctrl-btn">📸 Snap</button>
         </div>
@@ -24,6 +25,10 @@
         <span id="status-text">Loading model...</span>
         <span id="fps-counter"></span>
     </div>
+
+    <!-- Wild card picker -->
+    <div id="hun-display" class="hun-display">混儿: not set</div>
+    <div id="hun-picker" class="panel hun-panel"></div>
 
     <!-- Hand display -->
     <div id="hand-display" class="panel">
