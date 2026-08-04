@@ -8,7 +8,7 @@
  */
 
 // === Constants ===
-const MODEL_URL = 'https://github.com/Z3E0/tianjin-mahjong/releases/latest/download/model.onnx';
+const MODEL_URL = 'model.onnx';  // Served from same origin, no CORS issues
 const SNAPSHOT_INTERVAL = 3000; // ms between auto-snapshots
 const DETECTION_CONFIDENCE = 0.5;
 const DETECTION_IOU = 0.45;
