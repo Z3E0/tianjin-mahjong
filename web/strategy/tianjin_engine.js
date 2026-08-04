@@ -55,19 +55,9 @@ const TIANJIN_ENGINE = (() => {
     'z': [27, 33], // 字 (honors)
   };
 
-  // Fan values for patterns
-  const FAN_VALUES = {
-    '混儿吊': 1,   // Hun er tiao — winning pair uses wild card
-    '素的': 2,     // Su de — no wild cards used
-    '没混儿': 2,   // Mei hun er — no wild cards in hand
-    '捉伍儿': 2,   // Zhuo wu er — winning with a 5 tile
-    '龙': 2,       // Long — 1-9 straight in one suit
-    '本混儿龙': 3, // Ben hun er long — dragon with wild card as the actual tile
-    '清一色': 3,   // Qing yi se — all one suit
-    '七对': 2,     // Qi dui — seven pairs
-    '杠开': 1,     // Gang kai — win on kong draw
-    '自摸': 1,     // Zi mo — self-draw (standard in Tianjin)
-  };
+  // Fan values — simplified rules
+  const FAN_VALUES = { '龙': 4, '捉五': 3, '杠开': 2 };
+  const FIVE_WAN = 4; // 5万 tile ID
 
   // === Helper Functions ===
 
@@ -126,23 +116,17 @@ const TIANJIN_ENGINE = (() => {
   }
 
   /**
-   * Check if a tile is a 混儿 (wild card).
-   * The 混儿 is the tile AFTER the dora indicator in sequence.
-   * E.g., if dora is 3万 (id 2), then 混儿 is 4万 (id 3).
+   * Check if a tile is 混儿. TWO tile types are wild:
+   * the dora indicator itself AND the next tile in sequence.
+   * Total: ~7 tiles (one indicator stays in wall, 4+4-1=7).
    */
   function isHun(tileId, hunDoraId) {
     if (hunDoraId === null || hunDoraId === undefined) return false;
-    // The wild card wraps: if dora is 9 of a suit, wild is 1 of same suit
+    if (tileId === hunDoraId) return true;
+    if (tileSuit(tileId) !== tileSuit(hunDoraId)) return false;
     const suit = tileSuit(hunDoraId);
-    if (tileSuit(tileId) !== suit) return false;
-    if (suit === 'z') {
-      // Honors don't wrap around typically, but handle edge case
-      if (hunDoraId === 33) return tileId === 27; // 白 → 东
-      return tileId === hunDoraId + 1;
-    }
-    const doraNum = tileNum(hunDoraId);
-    const wildNum = (doraNum % 9) + 1;
-    return tileNum(tileId) === wildNum;
+    if (suit === 'z') return tileId === hunDoraId + 1;
+    return tileNum(tileId) === (tileNum(hunDoraId) % 9) + 1;
   }
 
   // === Pattern Detection ===
@@ -193,177 +177,70 @@ const TIANJIN_ENGINE = (() => {
     return suits.size === 1;
   }
 
-  /**
-   * Check if hand has 混儿吊 (a pair formed by a wild card being used as the winning pair).
-   * This means the hand completes with a wild card serving as the pair/eye.
-   */
-  function isHunErDiao(handCounts, hunTileIds, pairTile) {
-    if (!hunTileIds || hunTileIds.length === 0) return false;
-    return hunTileIds.includes(pairTile);
-  }
+  // Note: isHunErDiao, isZhuoWuEr, isSuDe removed — only 捉五龙 & 杠开 allowed
 
   /**
-   * Check if hand has 捉伍儿 (winning with a 5 tile as the pair).
+   * Detect win pattern for 14-tile hand under simplified rules.
+   * Returns { win, type, totalFan, dragonSuit, ... }
    */
-  function isZhuoWuEr(pairTile) {
-    // 5万=4, 5筒=13, 5条=22
-    return pairTile === 4 || pairTile === 13 || pairTile === 22;
-  }
-
-  /**
-   * Check if hand has 素的 / 没混儿 (no wild cards used).
-   */
-  function isSuDe(handCounts, hunTileIds) {
-    if (!hunTileIds || hunTileIds.length === 0) return true;
-    return hunTileIds.every(hid => handCounts[hid] === 0);
-  }
-
-  /**
-   * Detect all active patterns and compute total fan.
-   * Returns { patterns: string[], totalFan: number }
-   */
-  function detectPatterns(handCounts, hunTileIds, pairTile) {
-    const patterns = [];
-    let totalFan = 0;
-
-    // 混儿吊
-    if (isHunErDiao(handCounts, hunTileIds, pairTile)) {
-      patterns.push('混儿吊');
-      totalFan += FAN_VALUES['混儿吊'];
-    }
-
-    // 素的
-    if (isSuDe(handCounts, hunTileIds)) {
-      patterns.push('素的');
-      totalFan += FAN_VALUES['素的'];
-    }
-
-    // 捉伍儿
-    if (isZhuoWuEr(pairTile)) {
-      patterns.push('捉伍儿');
-      totalFan += FAN_VALUES['捉伍儿'];
-    }
-
-    // 龙
-    const dragon = hasDragon(handCounts, hunTileIds);
-    if (dragon) {
-      const hasWildInDragon = hunTileIds && hunTileIds.some(hid =>
-        tileSuit(hid) === dragon
-      );
-      if (hasWildInDragon) {
-        patterns.push('本混儿龙');
-        totalFan += FAN_VALUES['本混儿龙'];
-      } else {
-        patterns.push('龙');
-        totalFan += FAN_VALUES['龙'];
+  function detectPatterns(handCounts, hunTileIds, isKongDraw) {
+    // 捉五龙: dragon + 5万 pair
+    const dragonSuit = hasDragon(handCounts, hunTileIds);
+    if (dragonSuit && sum(handCounts) === 14) {
+      const wildCount = hunTileIds ? hunTileIds.reduce((s, hid) => s + handCounts[hid], 0) : 0;
+      // Check 5万 pair
+      if (handCounts[FIVE_WAN] >= 2) {
+        const r = [...handCounts]; r[FIVE_WAN] -= 2;
+        if (canFormMelds(r, wildCount, hunTileIds))
+          return { win: true, type: '捉五龙', patterns: ['龙', '捉五'], totalFan: 7, dragonSuit };
+      }
+      // 1 wild + 1 5万 pair
+      if (wildCount >= 1 && handCounts[FIVE_WAN] >= 1) {
+        const r = [...handCounts]; r[FIVE_WAN] -= 1;
+        let removed = false;
+        for (const hid of hunTileIds) { if (r[hid] > 0) { r[hid]--; removed = true; break; } }
+        if (removed && canFormMelds(r, wildCount - 1, hunTileIds))
+          return { win: true, type: '捉五龙', patterns: ['龙', '捉五', '混儿'], totalFan: 7, dragonSuit };
+      }
+      // 2 wilds as pair
+      if (wildCount >= 2) {
+        const r = [...handCounts]; let rd = 0;
+        for (const hid of hunTileIds) { const rm = Math.min(2 - rd, r[hid]); r[hid] -= rm; rd += rm; if (rd >= 2) break; }
+        if (canFormMelds(r, wildCount - 2, hunTileIds))
+          return { win: true, type: '捉五龙', patterns: ['龙', '捉五', '混儿'], totalFan: 7, dragonSuit };
       }
     }
 
-    // 清一色
-    if (isQingYiSe(handCounts, hunTileIds)) {
-      patterns.push('清一色');
-      totalFan += FAN_VALUES['清一色'];
+    // 杠上开花: any structurally complete hand (only on kong draw)
+    if (isKongDraw && isStructurallyComplete(handCounts, hunTileIds)) {
+      return { win: true, type: '杠开', patterns: ['杠开'], totalFan: 2 };
     }
 
-    // 七对 (checked separately in isComplete)
-    // 自摸 (always true in Tianjin since no discard win)
-    patterns.push('自摸');
-    totalFan += FAN_VALUES['自摸'];
-
-    return { patterns, totalFan };
+    return { win: false, type: null };
   }
 
-  // === Shanten Calculation ===
-
-  /**
-   * Check if a hand (14 tiles) is a complete winning hand.
-   * Handles regular hands (4 melds + 1 pair) and seven pairs.
-   * Supports wild cards (混儿).
-   */
-  function isComplete(counts, hunTileIds) {
-    const total = sum(counts);
-    if (total !== 14) return false;
-
-    // Check seven pairs
-    if (isSevenPairs(counts, hunTileIds)) return true;
-
-    // Check regular hand: try each possible pair
+  // === Structural Completion ===
+  function isStructurallyComplete(counts, hunTileIds) {
+    if (sum(counts) !== 14) return false;
     const wildCount = hunTileIds ? hunTileIds.reduce((s, hid) => s + counts[hid], 0) : 0;
-
     for (let i = 0; i < NUM_TILES; i++) {
       if (counts[i] >= 2) {
-        const remaining = [...counts];
-        remaining[i] -= 2;
+        const remaining = [...counts]; remaining[i] -= 2;
         if (canFormMelds(remaining, wildCount, hunTileIds)) return true;
       }
     }
-
-    // Try wild card as pair
     if (wildCount >= 2 && hunTileIds) {
-      const remaining = [...counts];
-      // Remove 2 wild cards
-      let toRemove = 2;
-      for (const hid of hunTileIds) {
-        const r = Math.min(toRemove, remaining[hid]);
-        remaining[hid] -= r;
-        toRemove -= r;
-        if (toRemove === 0) break;
-      }
-      // Wild cards can also stand in for the pair
+      const remaining = [...counts]; let toRemove = 2;
+      for (const hid of hunTileIds) { const r = Math.min(toRemove, remaining[hid]); remaining[hid] -= r; toRemove -= r; if (toRemove === 0) break; }
+      if (canFormMelds(remaining, wildCount - 2, hunTileIds)) return true;
     }
-
-    // Try pair formed by 1 wild + 1 regular tile
-    if (wildCount >= 1 && hunTileIds) {
-      for (let i = 0; i < NUM_TILES; i++) {
-        if (counts[i] >= 1 && !hunTileIds.includes(i)) {
-          const remaining = [...counts];
-          remaining[i] -= 1;
-          // Remove 1 wild
-          for (const hid of hunTileIds) {
-            if (remaining[hid] > 0) {
-              remaining[hid]--;
-              break;
-            }
-          }
-          if (canFormMelds(remaining, wildCount - 1, hunTileIds)) return true;
-        }
-      }
-    }
-
     return false;
   }
-
-  function isSevenPairs(counts, hunTileIds) {
-    let pairs = 0;
-    let wildsAvailable = hunTileIds
-      ? hunTileIds.reduce((s, hid) => s + counts[hid], 0)
-      : 0;
-
-    const remaining = [...counts];
-    if (hunTileIds) {
-      for (const hid of hunTileIds) remaining[hid] = 0;
-    }
-
-    for (let i = 0; i < NUM_TILES; i++) {
-      if (remaining[i] >= 2) {
-        pairs++;
-        remaining[i] -= 2;
-        if (remaining[i] >= 2) {
-          pairs++;
-          remaining[i] -= 2;
-        }
-      }
-    }
-
-    // Use wilds to complete remaining singles into pairs
-    const singles = sum(remaining);
-    const wildPairsNeeded = Math.ceil(singles / 2);
-    if (wildPairsNeeded <= Math.floor(wildsAvailable / 2)) {
-      pairs += (7 - pairs);
-    }
-
-    return pairs >= 7;
+  function isComplete(counts, hunTileIds) {
+    return isStructurallyComplete(counts, hunTileIds);
   }
+
+  // Seven pairs removed — not a valid win in simplified rules.
 
   function canFormMelds(counts, wildCount, hunTileIds) {
     if (sum(counts) === 0) return true;
@@ -612,6 +489,8 @@ const TIANJIN_ENGINE = (() => {
     // Try discarding each unique tile in hand
     const seen = new Set();
     for (const tileId of handIds) {
+      // 混儿不能打! — cannot discard wild cards
+      if (hunTileIds.includes(tileId)) continue;
       if (seen.has(tileId)) continue;
       seen.add(tileId);
 
@@ -668,35 +547,20 @@ const TIANJIN_ENGINE = (() => {
 
   // === Public API ===
   return {
-    TILE_TO_ID,
-    ID_TO_TILE,
-    TILE_NAMES,
-    NUM_TILES,
+    TILE_TO_ID, ID_TO_TILE, TILE_NAMES, NUM_TILES, FIVE_WAN,
 
-    tileId,
-    tileName,
-    tileSuit,
-    tileNum,
-    parseTiles,
-    countTiles,
-    getRemaining,
+    tileId, tileName, tileSuit, tileNum,
+    parseTiles, countTiles, getRemaining,
 
-    isHun,
-    findHunTileIds,
+    isHun, findHunTileIds,
 
-    calcShanten,
-    findWaits,
-    analyzeDiscard,
-    safetyScore,
-    safetyEmoji,
+    calcShanten, findWaits, analyzeDiscard,
+    safetyScore, safetyEmoji,
 
-    isComplete,
-    detectPatterns,
-    hasDragon,
-    isQingYiSe,
+    isComplete, isStructurallyComplete,
+    detectPatterns, hasDragon,
 
-    FAN_VALUES,
-    SUIT_RANGES,
+    FAN_VALUES, SUIT_RANGES,
   };
 })();
 
