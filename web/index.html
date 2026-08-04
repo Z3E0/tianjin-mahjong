@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Tianjin Mahjong AI</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Camera view -->
+    <div id="camera-container">
+        <video id="camera" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+        <div id="camera-controls">
+            <button id="btn-toggle" class="ctrl-btn">⏸ Pause</button>
+            <button id="btn-snapshot" class="ctrl-btn">📸 Snap</button>
+        </div>
+    </div>
+
+    <!-- Status bar -->
+    <div id="status-bar">
+        <span id="status-text">Loading model...</span>
+        <span id="fps-counter"></span>
+    </div>
+
+    <!-- Hand display -->
+    <div id="hand-display" class="panel">
+        <div class="panel-header">
+            <span class="panel-title">🀄 Your Hand</span>
+            <span id="tile-count">0 tiles</span>
+        </div>
+        <div id="hand-tiles" class="tile-grid"></div>
+        <div id="hand-raw" class="raw-text"></div>
+    </div>
+
+    <!-- Discard display -->
+    <div id="discard-display" class="panel">
+        <div class="panel-header">
+            <span class="panel-title">🗑️ Discards</span>
+            <button id="btn-clear-discards" class="small-btn">Clear</button>
+        </div>
+        <div id="discard-tiles" class="tile-grid small"></div>
+    </div>
+
+    <!-- Recommendation -->
+    <div id="recommendation" class="panel rec-panel">
+        <div class="panel-header">
+            <span class="panel-title">💡 Recommendation</span>
+        </div>
+        <div id="rec-content">
+            <p class="rec-waiting">Waiting for detection...</p>
+        </div>
+    </div>
+
+    <!-- Debug panel (collapsible) -->
+    <details id="debug-panel">
+        <summary>🔧 Debug</summary>
+        <div id="debug-content">
+            <pre id="debug-log"></pre>
+        </div>
+    </details>
+
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+    <script src="strategy/tianjin_engine.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
